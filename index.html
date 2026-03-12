@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>geobim.lab — BIM Viewer</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Top Bar -->
+    <header id="topbar">
+      <div class="topbar-left">
+        <h1 class="logo">geobim<span>.lab</span></h1>
+      </div>
+      <div class="topbar-center">
+        <label id="loadIfc" class="topbar-btn primary" title="Open IFC file">
+          <input type="file" accept=".ifc" id="ifcInput" hidden>
+          📂 Open IFC
+        </label>
+        <div class="dropdown-wrap">
+          <button id="serverModelsBtn" class="topbar-btn" title="Load from server">☁️ Server</button>
+          <div id="serverModelsMenu" class="dropdown-menu hidden"></div>
+        </div>
+        <button id="toggleTree" class="topbar-btn" title="Model Tree">🏗️ Tree</button>
+        <button id="toggleProps" class="topbar-btn" title="Properties">📋 Props</button>
+        <button id="toggleClipper" class="topbar-btn" title="Clipping Planes">✂️ Clip</button>
+        <button id="toggleGrid" class="topbar-btn active" title="Toggle Grid">⊞ Grid</button>
+      </div>
+      <div class="topbar-right">
+        <span id="status" class="status-text">Ready</span>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <div id="main">
+      <!-- Sidebar (Model Tree) -->
+      <aside id="sidebar" class="hidden">
+        <div class="panel-header">
+          <span>Model Tree</span>
+          <button class="panel-close" onclick="document.getElementById('sidebar').classList.add('hidden')">✕</button>
+        </div>
+        <div class="tree-search-wrap">
+          <input type="text" id="treeSearch" class="tree-search" placeholder="Filter elements...">
+          <span id="treeCount" class="tree-count"></span>
+        </div>
+        <div id="modelTree" class="panel-body">
+          <p class="empty-state">Load an IFC file to see the model tree</p>
+        </div>
+      </aside>
+
+      <!-- 3D Viewport -->
+      <div id="viewport"></div>
+
+      <!-- Properties Panel -->
+      <aside id="propsPanel" class="hidden">
+        <div class="panel-header">
+          <span>Properties</span>
+          <button class="panel-close" onclick="document.getElementById('propsPanel').classList.add('hidden')">✕</button>
+        </div>
+        <div id="propsContent" class="panel-body">
+          <p class="empty-state">Click an element to see its properties</p>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="hidden">
+      <div class="loading-content">
+        <div class="spinner"></div>
+        <p id="loadingText">Loading IFC model...</p>
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Drop Zone Overlay -->
+    <div id="dropZone" class="hidden">
+      <div class="drop-content">
+        <span class="drop-icon">📂</span>
+        <p>Drop IFC file here</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
