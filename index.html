@@ -15,18 +15,23 @@
         <h1 class="logo">geobim<span>.lab</span></h1>
       </div>
       <div class="topbar-center">
-        <label id="loadIfc" class="topbar-btn primary" title="Open IFC file">
-          <input type="file" accept=".ifc" id="ifcInput" hidden>
-          📂 Open IFC
+        <label id="loadIfc" class="topbar-btn primary" title="Open IFC file(s)">
+          <input type="file" accept=".ifc" id="ifcInput" multiple hidden>
+          Open IFC
         </label>
         <div class="dropdown-wrap">
-          <button id="serverModelsBtn" class="topbar-btn" title="Load from server">☁️ Server</button>
+          <button id="serverModelsBtn" class="topbar-btn" title="Load from server">Server</button>
           <div id="serverModelsMenu" class="dropdown-menu hidden"></div>
         </div>
-        <button id="toggleTree" class="topbar-btn" title="Model Tree">🏗️ Tree</button>
-        <button id="toggleProps" class="topbar-btn" title="Properties">📋 Props</button>
-        <button id="toggleClipper" class="topbar-btn" title="Clipping Planes">✂️ Clip</button>
-        <button id="toggleGrid" class="topbar-btn active" title="Toggle Grid">⊞ Grid</button>
+        <button id="toggleFiles" class="topbar-btn" title="File Manager">Files <span id="filesBadge" class="badge hidden">0</span></button>
+        <button id="toggleTree" class="topbar-btn" title="Model Tree">Tree</button>
+        <button id="toggleProps" class="topbar-btn" title="Properties">Props</button>
+        <button id="toggleClipper" class="topbar-btn" title="Clipping Planes">Clip</button>
+        <button id="toggleHide" class="topbar-btn" title="Hide Mode (H)">Hide <span id="hideBadge" class="badge hidden">0</span></button>
+        <button id="toggleDelete" class="topbar-btn" title="Delete Mode (D)">Delete <span id="deleteBadge" class="badge hidden">0</span></button>
+        <button id="showAllBtn" class="topbar-btn hidden" title="Show All Hidden (Shift+H)">Show All</button>
+        <button id="undoDeleteBtn" class="topbar-btn hidden" title="Undo Delete (Ctrl+Z)">Undo</button>
+        <button id="toggleGrid" class="topbar-btn active" title="Toggle Grid">Grid</button>
       </div>
       <div class="topbar-right">
         <span id="status" class="status-text">Ready</span>
@@ -39,7 +44,12 @@
       <aside id="sidebar" class="hidden">
         <div class="panel-header">
           <span>Model Tree</span>
-          <button class="panel-close" onclick="document.getElementById('sidebar').classList.add('hidden')">✕</button>
+          <button class="panel-close" onclick="document.getElementById('sidebar').classList.add('hidden')">&#10005;</button>
+        </div>
+        <div class="filter-actions" id="filterActions" style="display:none;">
+          <button class="filter-btn" id="filterAll">All</button>
+          <button class="filter-btn" id="filterNone">None</button>
+          <button class="filter-btn" id="filterInvert">Invert</button>
         </div>
         <div class="tree-search-wrap">
           <input type="text" id="treeSearch" class="tree-search" placeholder="Filter elements...">
@@ -51,13 +61,64 @@
       </aside>
 
       <!-- 3D Viewport -->
-      <div id="viewport"></div>
+      <div id="viewport">
+        <!-- Hide Mode Banner -->
+        <div id="hideBanner" class="hide-mode-indicator hidden">HIDE MODE — click to hide</div>
+        <!-- Delete Mode Banner -->
+        <div id="deleteBanner" class="hide-mode-indicator hidden" style="background:rgba(200,60,60,0.9)">DELETE MODE — click to delete (Ctrl+Z undo)</div>
+
+        <!-- File Manager Panel -->
+        <div id="filesPanel" class="files-panel hidden">
+          <div class="files-panel-header">
+            <span class="files-panel-title">Files</span>
+            <span id="filesTotalInfo" class="files-total-info"></span>
+          </div>
+          <div id="filesList" class="files-list">
+            <p class="files-empty">No files loaded</p>
+          </div>
+          <div class="files-actions">
+            <label class="files-btn primary" style="cursor:pointer;">
+              <input type="file" accept=".ifc" id="addFileInput" multiple hidden>
+              + Add File
+            </label>
+          </div>
+        </div>
+
+        <!-- Clipping Panel -->
+        <div id="clipPanel" class="clip-panel hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-size:12px;font-weight:700;color:var(--brand);text-transform:uppercase;letter-spacing:0.5px;">Clipping Planes</span>
+            <button class="panel-close" onclick="document.getElementById('clipPanel').classList.add('hidden');document.getElementById('toggleClipper').classList.remove('active');">&#10005;</button>
+          </div>
+          <div class="clip-axis" id="clipAxisX">
+            <input type="checkbox" id="clipXEnable">
+            <span class="clip-label" style="color:#ef4444;">X</span>
+            <input type="range" class="clip-slider" id="clipXSlider" min="0" max="100" value="100" disabled>
+            <span class="clip-val" id="clipXVal">--</span>
+            <button class="clip-flip" id="clipXFlip" title="Flip direction">&#8644;</button>
+          </div>
+          <div class="clip-axis" id="clipAxisY">
+            <input type="checkbox" id="clipYEnable">
+            <span class="clip-label" style="color:#22c55e;">Y</span>
+            <input type="range" class="clip-slider" id="clipYSlider" min="0" max="100" value="100" disabled>
+            <span class="clip-val" id="clipYVal">--</span>
+            <button class="clip-flip" id="clipYFlip" title="Flip direction">&#8644;</button>
+          </div>
+          <div class="clip-axis" id="clipAxisZ">
+            <input type="checkbox" id="clipZEnable">
+            <span class="clip-label" style="color:#3b82f6;">Z</span>
+            <input type="range" class="clip-slider" id="clipZSlider" min="0" max="100" value="100" disabled>
+            <span class="clip-val" id="clipZVal">--</span>
+            <button class="clip-flip" id="clipZFlip" title="Flip direction">&#8644;</button>
+          </div>
+        </div>
+      </div>
 
       <!-- Properties Panel -->
       <aside id="propsPanel" class="hidden">
         <div class="panel-header">
           <span>Properties</span>
-          <button class="panel-close" onclick="document.getElementById('propsPanel').classList.add('hidden')">✕</button>
+          <button class="panel-close" onclick="document.getElementById('propsPanel').classList.add('hidden')">&#10005;</button>
         </div>
         <div id="propsContent" class="panel-body">
           <p class="empty-state">Click an element to see its properties</p>
@@ -79,8 +140,8 @@
     <!-- Drop Zone Overlay -->
     <div id="dropZone" class="hidden">
       <div class="drop-content">
-        <span class="drop-icon">📂</span>
-        <p>Drop IFC file here</p>
+        <span class="drop-icon">&#128194;</span>
+        <p>Drop IFC file(s) here</p>
       </div>
     </div>
   </div>
