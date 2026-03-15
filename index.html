@@ -6,6 +6,9 @@
   <title>geobim.lab — BIM Viewer</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/src/style.css">
+  <!-- CesiumJS CDN -->
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Cesium.js"></script>
 </head>
 <body>
   <div id="app">
@@ -31,7 +34,12 @@
         <button id="toggleDelete" class="topbar-btn" title="Delete Mode (D)">Delete <span id="deleteBadge" class="badge hidden">0</span></button>
         <button id="showAllBtn" class="topbar-btn hidden" title="Show All Hidden (Shift+H)">Show All</button>
         <button id="undoDeleteBtn" class="topbar-btn hidden" title="Undo Delete (Ctrl+Z)">Undo</button>
+        <button id="toggleMeasure" class="topbar-btn" title="Measure (M)">Measure</button>
+        <button id="toggleGfx" class="topbar-btn" title="Graphics Settings">GFX</button>
         <button id="toggleGrid" class="topbar-btn active" title="Toggle Grid">Grid</button>
+        <button id="geoPickOrigin" class="topbar-btn" title="Pick reference point on model">Pick Origin</button>
+        <button id="geoCenterOrigin" class="topbar-btn" title="Center origin on model">Center Origin</button>
+        <button id="toggleGeo" class="topbar-btn" title="Georeferencing & Ion Upload">Geo</button>
       </div>
       <div class="topbar-right">
         <span id="status" class="status-text">Ready</span>
@@ -66,6 +74,33 @@
         <div id="hideBanner" class="hide-mode-indicator hidden">HIDE MODE — click to hide</div>
         <!-- Delete Mode Banner -->
         <div id="deleteBanner" class="hide-mode-indicator hidden" style="background:rgba(200,60,60,0.9)">DELETE MODE — click to delete (Ctrl+Z undo)</div>
+        <!-- Pick Origin Banner -->
+        <div id="originBanner" class="hide-mode-indicator hidden" style="background:rgba(59,130,246,0.9)">PICK ORIGIN — click on model</div>
+        <!-- Measure Widget -->
+        <div id="measureWidget" class="measure-widget hidden">
+          <div class="measure-tools">
+            <button class="measure-tool-btn active" data-measure="point" title="Point to Point (M)">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="4" cy="20" r="2"/><circle cx="20" cy="4" r="2"/><line x1="5.5" y1="18.5" x2="18.5" y2="5.5" stroke-dasharray="3 2"/></svg>
+            </button>
+            <button class="measure-tool-btn" data-measure="polyline" title="Polyline">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="3" cy="20" r="1.5"/><circle cx="9" cy="8" r="1.5"/><circle cx="17" cy="14" r="1.5"/><circle cx="22" cy="4" r="1.5"/><polyline points="3,20 9,8 17,14 22,4" stroke-dasharray="3 2"/></svg>
+            </button>
+            <button class="measure-tool-btn" data-measure="area" title="Area">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polygon points="4,20 8,4 20,6 18,18" fill="rgba(245,158,11,0.15)" stroke-dasharray="3 2"/><circle cx="4" cy="20" r="1.5"/><circle cx="8" cy="4" r="1.5"/><circle cx="20" cy="6" r="1.5"/><circle cx="18" cy="18" r="1.5"/></svg>
+            </button>
+            <button class="measure-tool-btn" data-measure="vertical" title="Vertical Distance">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="3" x2="12" y2="21"/><polyline points="9,6 12,3 15,6"/><polyline points="9,18 12,21 15,18"/><line x1="6" y1="3" x2="18" y2="3" stroke-dasharray="2 2" opacity="0.4"/><line x1="6" y1="21" x2="18" y2="21" stroke-dasharray="2 2" opacity="0.4"/></svg>
+            </button>
+            <button class="measure-tool-btn" data-measure="horizontal" title="Horizontal Distance">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><polyline points="6,9 3,12 6,15"/><polyline points="18,9 21,12 18,15"/><line x1="3" y1="6" x2="3" y2="18" stroke-dasharray="2 2" opacity="0.4"/><line x1="21" y1="6" x2="21" y2="18" stroke-dasharray="2 2" opacity="0.4"/></svg>
+            </button>
+            <div class="measure-divider"></div>
+            <button id="clearMeasure" class="measure-tool-btn measure-clear" title="Clear All">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <div id="measureInfo" class="measure-info">Click to measure</div>
+        </div>
 
         <!-- File Manager Panel -->
         <div id="filesPanel" class="files-panel hidden">
@@ -81,7 +116,74 @@
               <input type="file" accept=".ifc" id="addFileInput" multiple hidden>
               + Add File
             </label>
+            <button id="mergeIfc" class="files-btn hidden" title="Merge all IFC files into one">Merge</button>
+            <button id="downloadIfc" class="files-btn hidden" title="Download IFC (with deletions applied)">Download</button>
           </div>
+        </div>
+
+        <!-- GFX Panel -->
+        <div id="gfxPanel" class="gfx-panel hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <span class="gfx-section-title" style="margin:0;">Graphics</span>
+            <button class="panel-close" onclick="document.getElementById('gfxPanel').classList.add('hidden');document.getElementById('toggleGfx').classList.remove('active');">&#10005;</button>
+          </div>
+
+          <!-- Lighting -->
+          <div class="gfx-section-title">Lighting</div>
+          <div class="gfx-row"><label>Ambient</label><input type="range" id="gfx-ambient" min="0" max="2" step="0.05" value="0.3"><span id="gfx-ambient-val" class="gfx-val">0.30</span></div>
+          <div class="gfx-row"><label>Sun</label><input type="range" id="gfx-sun" min="0" max="4" step="0.05" value="1.4"><span id="gfx-sun-val" class="gfx-val">1.40</span></div>
+          <div class="gfx-row"><label>Fill</label><input type="range" id="gfx-fill" min="0" max="2" step="0.05" value="0.3"><span id="gfx-fill-val" class="gfx-val">0.30</span></div>
+          <div class="gfx-row"><label>Hemi</label><input type="range" id="gfx-hemi" min="0" max="2" step="0.05" value="0.5"><span id="gfx-hemi-val" class="gfx-val">0.50</span></div>
+
+          <!-- Tone Mapping -->
+          <div class="gfx-section-title">Tone Mapping</div>
+          <div class="gfx-row">
+            <label>Mode</label>
+            <select id="gfx-tonemap" class="gfx-select">
+              <option value="4" selected>ACES Filmic</option>
+              <option value="5">AgX</option>
+              <option value="1">Linear</option>
+              <option value="2">Reinhard</option>
+              <option value="3">Cineon</option>
+              <option value="0">None</option>
+            </select>
+          </div>
+          <div class="gfx-row"><label>Exposure</label><input type="range" id="gfx-exposure" min="0.1" max="4" step="0.05" value="1.2"><span id="gfx-exposure-val" class="gfx-val">1.20</span></div>
+
+          <!-- Ambient Occlusion -->
+          <div class="gfx-section-title">Ambient Occlusion</div>
+          <div class="gfx-row"><label>Intensity</label><input type="range" id="gfx-ao-intensity" min="0" max="10" step="0.1" value="5.1"><span id="gfx-ao-intensity-val" class="gfx-val">5.10</span></div>
+          <div class="gfx-row"><label>Radius</label><input type="range" id="gfx-ao-radius" min="0.1" max="20" step="0.1" value="10.4"><span id="gfx-ao-radius-val" class="gfx-val">10.40</span></div>
+          <div class="gfx-row"><label>Falloff</label><input type="range" id="gfx-ao-falloff" min="0.1" max="5" step="0.1" value="1.9"><span id="gfx-ao-falloff-val" class="gfx-val">1.90</span></div>
+          <div class="gfx-row"><label>Enabled</label><input type="checkbox" id="gfx-ao-enabled" checked></div>
+          <div class="gfx-row">
+            <label>Quality</label>
+            <select id="gfx-ao-quality" class="gfx-select">
+              <option value="Low">Low</option>
+              <option value="Medium">Medium</option>
+              <option value="High">High</option>
+              <option value="Ultra" selected>Ultra</option>
+            </select>
+          </div>
+
+          <!-- Materials -->
+          <div class="gfx-section-title">Materials</div>
+          <div class="gfx-row"><label>PBR Materials</label><input type="checkbox" id="gfx-pbr" checked></div>
+
+          <!-- Scene -->
+          <div class="gfx-section-title">Scene</div>
+          <div class="gfx-row"><label>Background</label><input type="color" id="gfx-bgcolor" value="#0D1017" class="gfx-color"></div>
+          <div class="gfx-row"><label>Resolution</label><input type="range" id="gfx-dpr" min="0.5" max="2" step="0.25" value="1"><span id="gfx-dpr-val" class="gfx-val">1.00</span></div>
+          <div class="gfx-row">
+            <label>Anti-Alias</label>
+            <select id="gfx-msaa" class="gfx-select">
+              <option value="0">Off</option>
+              <option value="2">2x MSAA</option>
+              <option value="4" selected>4x MSAA</option>
+              <option value="8">8x MSAA</option>
+            </select>
+          </div>
+          <div class="gfx-row"><label>SMAA</label><input type="checkbox" id="gfx-smaa" checked></div>
         </div>
 
         <!-- Clipping Panel -->
@@ -113,6 +215,57 @@
           </div>
         </div>
       </div>
+
+      <!-- Geo Splitter -->
+      <div id="geoSplitter" class="geo-splitter hidden"></div>
+      <!-- Geo Panel -->
+      <aside id="geoPanel" class="geo-panel hidden">
+        <div id="cesiumMinimap" class="geo-minimap">
+          <!-- Search bar overlay (top) -->
+          <div class="geo-search-overlay">
+            <input type="text" id="geoSearch" class="geo-input" placeholder="Search address or coordinates...">
+            <button id="geoSearchBtn" class="geo-btn-icon" title="Search">&#128269;</button>
+            <span id="geoStatus" class="geo-status-inline">No position set</span>
+            <button id="geoClose" class="geo-close-btn" title="Close">&#10005;</button>
+          </div>
+
+          <!-- Compact coord card overlay (bottom) -->
+          <div class="geo-card-overlay">
+            <div class="geo-card-compact">
+              <div class="geo-coord-row">
+                <label>Lon</label><input type="number" id="geoLon" class="geo-input geo-coord" step="0.000001" placeholder="10.95">
+                <label>Lat</label><input type="number" id="geoLat" class="geo-input geo-coord" step="0.000001" placeholder="50.73">
+                <label>H</label><input type="number" id="geoHeight" class="geo-input geo-coord" step="0.1" value="0" placeholder="0">
+                <input type="range" id="geoHeightSlider" class="geo-slider" min="-50" max="200" step="0.5" value="0">
+              </div>
+              <div class="geo-coord-row">
+                <label>Hdg</label><input type="number" id="geoRotation" class="geo-input geo-coord" step="0.1" value="0" min="-180" max="180">
+                <input type="range" id="geoRotSlider" class="geo-slider" min="-180" max="180" step="0.5" value="0">
+                <label>Map</label>
+                <select id="geoLayerSelect" class="geo-input geo-coord">
+                  <option value="default">Satellite</option>
+                  <option value="by_dop">Luftbild BY</option>
+                  <option value="by_amtl_karte">Topo BY</option>
+                  <option value="by_webkarte">Webkarte BY</option>
+                  <option value="by_webkarte_grau">Grau BY</option>
+                  <option value="alkis_farbe">Kataster Farbe</option>
+                  <option value="alkis_grau">Kataster Grau</option>
+                  <option value="alkis_umring">Kataster Umring</option>
+                </select>
+              </div>
+              <div class="geo-card-actions">
+                <button id="geoZoomBtn" class="geo-btn-icon" title="Zoom to model">&#127919;</button>
+                <button id="geoUploadBtn" class="geo-upload-btn">Upload to Ion</button>
+                <button id="geoTokenToggle" class="geo-btn-icon" title="Cesium Ion Token">&#128273;</button>
+              </div>
+            </div>
+            <div id="geoTokenPopover" class="geo-token-popover" style="display:none">
+              <input type="password" id="geoIonToken" class="geo-input" placeholder="Paste Cesium Ion access token...">
+            </div>
+            <a id="geoAssetLink" class="geo-asset-link" href="#" target="_blank" style="display:none"></a>
+          </div>
+        </div>
+      </aside>
 
       <!-- Properties Panel -->
       <aside id="propsPanel" class="hidden">
