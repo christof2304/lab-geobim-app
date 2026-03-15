@@ -50,4 +50,4 @@ index.html     App shell
 
 ## License
 
-Private
+[MIT](LICENSE)
