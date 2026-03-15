@@ -1,4 +1,24 @@
 node_modules/
 dist/
-public/models/*.ifc
+
+# IFC files (large binaries)
 *.ifc
+public/models/*.ifc
+
+# WASM binaries (built/copied at install)
+*.wasm
+
+# GLB models
+*.glb
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code project config
+CLAUDE.md
+
+# Environment / secrets
+.env
+.env.*
