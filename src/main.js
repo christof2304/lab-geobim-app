@@ -4,7 +4,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { N8AOPass } from 'n8ao';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
-import { toggleGeoPanel, setupGeoUI, invalidateGlbCache, updateFootprint, preGenerateGlb, autoDetectGeoref } from './georef.js';
+import { toggleGeoPanel, setupGeoUI, invalidateGlbCache, updateFootprint, preGenerateGlb, autoDetectGeoref, applyGeorefOverride, activatePickupMode } from './georef.js';
 
 // Intercept BufferAttribute upload callbacks that delete .array
 // ThatOpen sets onUploadCallback = function(){delete this.array} to free CPU memory.
@@ -72,6 +72,10 @@ const state = {
   lastFileBuffer: null,
   lastFileName: null,
   pickOriginMode: false,
+  pickOriginStep: 0,   // 0=inactive, 1=origin, 2=x-axis
+  localXAxis: null,     // THREE.Vector3 from pick step 2
+  xAxisArrow: null,     // ArrowHelper visualization
+  _pickOriginKeyHandler: null,
   originMarker: null,
   snapPreview: null,
   modelWrapper: null,
@@ -561,6 +565,12 @@ async function loadIFC(file) {
     // Auto-detect georeferencing from IFC
     autoDetectGeoref(data);
 
+    // CRS panel — decode IFC text and show georef status
+    try {
+      const ifcText = new TextDecoder('utf-8', { fatal: false }).decode(data);
+      updateCrsPanel(ifcText);
+    } catch (_) {}
+
     updateFilesBadge();
     renderFilesPanel();
     buildModelTree();
@@ -633,6 +643,12 @@ async function loadServerModel(url, name) {
     setStatus(`${name} loaded`);
     console.log('Server IFC loaded:', name, `${sizeMB} MB`);
     hideLoading();
+
+    // CRS panel
+    try {
+      const ifcText = new TextDecoder('utf-8', { fatal: false }).decode(data);
+      updateCrsPanel(ifcText);
+    } catch (_) {}
 
     updateFilesBadge();
     renderFilesPanel();
@@ -862,6 +878,120 @@ function extractGuids(text) {
   let m;
   while ((m = re.exec(text)) !== null) guids.push(m[1]);
   return guids;
+}
+
+/**
+ * Extract CRS / georeferencing info from raw IFC text.
+ *
+ * Parses IfcSite lat/lon, IfcMapConversion, IfcProjectedCRS via regex.
+ * No IFC parser needed — works on the raw STEP text.
+ *
+ * @param {string} ifcText - Raw IFC file content as string
+ * @returns {{
+ *   site: { lat: number|null, lon: number|null },
+ *   mapConversion: { exists: boolean, eastings: number|null, northings: number|null,
+ *                    height: number|null, xAxis: number|null, scale: number|null },
+ *   projectedCRS: { exists: boolean, name: string|null, epsg: string|null },
+ *   diagnosis: { isRevitDefault: boolean, isFullyGeoReferenced: boolean,
+ *                isPartial: boolean, recommendation: string }
+ * }}
+ *
+ * @example
+ * // Example IFC snippets this function handles:
+ * // #101=IFCSITE('guid',$,'Site',$,$,#102,$,$,.ELEMENT.,(52,31,12,0),(13,24,44,0),0.,$,$);
+ * // #200=IFCMAPCONVERSION(#180,#201,388800.0,5819600.0,0.0,1.0,0.0,1.0);
+ * // #201=IFCPROJECTEDCRS('EPSG:25833','ETRS89 / UTM zone 33N',$,$,$,$,$);
+ */
+function extractCRSInfo(ifcText) {
+  const result = {
+    site: { lat: null, lon: null },
+    mapConversion: { exists: false, eastings: null, northings: null, height: null, xAxisAbscissa: null, xAxisOrdinate: null, scale: null },
+    projectedCRS: { exists: false, name: null, epsg: null },
+    diagnosis: { isRevitDefault: false, isFullyGeoReferenced: false, isPartial: false, recommendation: 'CRS nicht lesbar' }
+  };
+
+  if (!ifcText) return result;
+
+  try {
+    // ── IfcSite: RefLatitude / RefLongitude ──
+    // Format: IFCSITE('guid',...,(deg,min,sec,millionthsec),(deg,min,sec,millionthsec),elevation,...);
+    const siteRe = /IFCSITE\s*\([^)]*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)\s*,\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)/i;
+    const siteMatch = ifcText.match(siteRe);
+    if (siteMatch) {
+      const dms = (d, m, s, ms) => parseInt(d) + parseInt(m) / 60 + parseInt(s) / 3600 + parseInt(ms) / 3600000000;
+      result.site.lat = dms(siteMatch[1], siteMatch[2], siteMatch[3], siteMatch[4]);
+      result.site.lon = dms(siteMatch[5], siteMatch[6], siteMatch[7], siteMatch[8]);
+    }
+
+    // ── IfcMapConversion ──
+    // IFC4 schema: IFCMAPCONVERSION(SourceCRS, TargetCRS, Eastings, Northings,
+    //              OrthogonalHeight, XAxisAbscissa, XAxisOrdinate, Scale)
+    //              Index:            #ref       #ref       1          2
+    //                                3               4              5        6
+    const mcRe = /IFCMAPCONVERSION\s*\(\s*#\d+\s*,\s*#\d+\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,)]+)(?:\s*,\s*([^,)]+))?\s*\)/i;
+    const mcMatch = ifcText.match(mcRe);
+    if (mcMatch) {
+      result.mapConversion.exists = true;
+      result.mapConversion.eastings = parseFloat(mcMatch[1]);       // Eastings
+      result.mapConversion.northings = parseFloat(mcMatch[2]);      // Northings
+      result.mapConversion.height = parseFloat(mcMatch[3]);         // OrthogonalHeight
+      result.mapConversion.xAxisAbscissa = parseFloat(mcMatch[4]);  // XAxisAbscissa
+      result.mapConversion.xAxisOrdinate = parseFloat(mcMatch[5]);  // XAxisOrdinate
+      result.mapConversion.scale = mcMatch[6] && mcMatch[6].trim() !== '$' ? parseFloat(mcMatch[6]) : 1.0;
+    }
+
+    // ── IfcProjectedCRS ──
+    // IFCPROJECTEDCRS('name','description',$,$,$,$,$)
+    const crsRe = /IFCPROJECTEDCRS\s*\(\s*'([^']*)'/i;
+    const crsMatch = ifcText.match(crsRe);
+    if (crsMatch) {
+      result.projectedCRS.exists = true;
+      result.projectedCRS.name = crsMatch[1];
+      // Extract EPSG code from name (e.g. 'EPSG:25833' or 'ETRS89 / UTM zone 33N')
+      const epsgMatch = crsMatch[1].match(/EPSG[:\s]*(\d+)/i);
+      if (epsgMatch) {
+        result.projectedCRS.epsg = 'EPSG:' + epsgMatch[1];
+      }
+    }
+
+    // ── Diagnosis ──
+    const lat = result.site.lat;
+    const lon = result.site.lon;
+    const hasLatLon = lat !== null && lon !== null;
+    const hasMC = result.mapConversion.exists;
+    const hasCRS = result.projectedCRS.exists;
+
+    // Revit default: Berlin ~52.5°N, 13.4°E (placeholder coordinates)
+    if (hasLatLon) {
+      result.diagnosis.isRevitDefault = Math.abs(lat - 52.5) < 0.5 && Math.abs(lon - 13.4) < 0.5;
+    }
+
+    if (hasMC && hasCRS) {
+      result.diagnosis.isFullyGeoReferenced = true;
+      result.diagnosis.isPartial = false;
+      if (result.diagnosis.isRevitDefault) {
+        result.diagnosis.recommendation = 'IfcMapConversion + CRS vorhanden, aber IfcSite enthält Revit-Standardkoordinaten — Lage prüfen';
+      } else {
+        result.diagnosis.recommendation = 'Vollständig georeferenziert — direkt verwendbar';
+      }
+    } else if (hasLatLon && !result.diagnosis.isRevitDefault) {
+      result.diagnosis.isPartial = true;
+      result.diagnosis.recommendation = hasCRS
+        ? 'IfcSite + CRS vorhanden, IfcMapConversion fehlt — manuelle Positionierung empfohlen'
+        : 'Nur IfcSite-Koordinaten — Genauigkeit begrenzt, manuelle Positionierung empfohlen';
+    } else if (hasMC && !hasCRS) {
+      result.diagnosis.isPartial = true;
+      result.diagnosis.recommendation = 'IfcMapConversion ohne CRS — Koordinatensystem unbekannt, EPSG manuell setzen';
+    } else if (hasLatLon && result.diagnosis.isRevitDefault) {
+      result.diagnosis.recommendation = 'Nur Revit-Standardkoordinaten (Berlin) — keine echte Georeferenzierung, manuell positionieren';
+    } else {
+      result.diagnosis.recommendation = 'Keine Georeferenzierung gefunden — manuell positionieren';
+    }
+  } catch (e) {
+    console.warn('extractCRSInfo error:', e);
+  }
+
+  return result;
 }
 
 function remapIds(line, offset) {
@@ -1975,6 +2105,9 @@ function setupUI() {
   // GFX panel
   setupGfxPanel();
 
+  // CRS panel
+  setupCrsPanel();
+
   // Geo panel
   document.getElementById('toggleGeo')?.addEventListener('click', () => toggleGeoPanel(state));
   document.getElementById('geoClose')?.addEventListener('click', () => toggleGeoPanel(state));
@@ -2584,20 +2717,53 @@ function updateSnapPreview(result) {
 
 function togglePickOrigin() {
   state.pickOriginMode = !state.pickOriginMode;
+  state.pickOriginStep = state.pickOriginMode ? 1 : 0;
   document.getElementById('geoPickOrigin')?.classList.toggle('active', state.pickOriginMode);
 
   const banner = document.getElementById('originBanner');
   if (state.pickOriginMode) {
     if (state.hideMode) toggleHideMode();
     if (state.deleteMode) toggleDeleteMode();
-    if (banner) banner.classList.remove('hidden');
+    if (banner) { banner.classList.remove('hidden'); banner.textContent = 'PICK ORIGIN — Schritt 1: Ursprung klicken'; }
     state.world.renderer.three.domElement.style.cursor = 'crosshair';
-    setStatus('Click on model to snap origin to vertex/midpoint');
+    setStatus('Schritt 1: Klick auf Modell für Ursprung');
+
+    // ESC / Enter handler for step 2
+    state._pickOriginKeyHandler = (e) => {
+      if (state.pickOriginStep === 2 && (e.key === 'Enter' || e.key === 'Escape')) {
+        e.preventDefault();
+        // Skip X-axis → default North
+        state.localXAxis = new THREE.Vector3(1, 0, 0);
+        updateXAxisDisplay(0);
+        finishPickOrigin();
+      }
+    };
+    document.addEventListener('keydown', state._pickOriginKeyHandler);
   } else {
+    state.pickOriginStep = 0;
     if (banner) banner.classList.add('hidden');
     state.world.renderer.three.domElement.style.cursor = '';
     removeSnapPreview();
+    removeXAxisArrow();
+    if (state._pickOriginKeyHandler) {
+      document.removeEventListener('keydown', state._pickOriginKeyHandler);
+      state._pickOriginKeyHandler = null;
+    }
     setStatus('Ready');
+  }
+}
+
+function finishPickOrigin() {
+  state.pickOriginStep = 0;
+  state.pickOriginMode = false;
+  document.getElementById('geoPickOrigin')?.classList.remove('active');
+  const banner = document.getElementById('originBanner');
+  if (banner) banner.classList.add('hidden');
+  state.world.renderer.three.domElement.style.cursor = '';
+  removeSnapPreview();
+  if (state._pickOriginKeyHandler) {
+    document.removeEventListener('keydown', state._pickOriginKeyHandler);
+    state._pickOriginKeyHandler = null;
   }
 }
 
@@ -2609,23 +2775,74 @@ async function handlePickOrigin() {
 
   const point = snapPoint(result);
 
-  // Shift all geometry so snapped point becomes origin
-  // ThatOpen fragments may have matrixAutoUpdate=false, so we
-  // shift the actual vertex positions instead of obj.position
-  shiftAllGeometry(point);
-  // Set orbit target to new origin
-  state.world.camera.controls.setTarget(0, 0, 0, true);
+  if (state.pickOriginStep === 1) {
+    // ── STEP 1: Set origin ──
+    shiftAllGeometry(point);
+    state.world.camera.controls.setTarget(0, 0, 0, true);
 
-  removeSnapPreview();
-  invalidateGlbCache();
-  showOriginMarker();
-  updateFootprint(state);
+    removeSnapPreview();
+    invalidateGlbCache();
+    showOriginMarker();
+    updateFootprint(state);
 
-  setStatus(`Origin snapped (shifted ${point.length().toFixed(1)}m)`);
-  console.log(`Pick Origin snapped to: (${point.x.toFixed(3)}, ${point.y.toFixed(3)}, ${point.z.toFixed(3)})`);
+    setStatus(`Ursprung gesetzt — Schritt 2: X-Achsenrichtung klicken (Enter = Norden)`);
+    const banner = document.getElementById('originBanner');
+    if (banner) { banner.textContent = 'PICK ORIGIN — Schritt 2: X-Achsenrichtung klicken (Enter = überspringen)'; banner.style.background = 'rgba(46,207,176,0.85)'; }
 
-  togglePickOrigin();
+    state.pickOriginStep = 2;
+    console.log(`Pick Origin Step 1: origin set (shifted ${point.length().toFixed(1)}m)`);
+
+  } else if (state.pickOriginStep === 2) {
+    // ── STEP 2: Define X-axis direction ──
+    // point is now relative to the new origin (since geometry was shifted in step 1)
+    // The direction from origin (0,0,0) to this clicked point = the local X direction
+    const xDir = point.clone().normalize();
+    state.localXAxis = xDir;
+
+    // Calculate rotation angle in XZ plane (horizontal)
+    // atan2(x, z) gives bearing from +Z axis; we want angle from +X axis
+    const angleDeg = Math.atan2(xDir.z, xDir.x) * (180 / Math.PI);
+    const bearingDeg = ((90 - angleDeg) % 360 + 360) % 360;
+
+    updateXAxisDisplay(bearingDeg);
+
+    // Rotate the origin marker so red X-axis points in the picked direction
+    // xDir is in XZ plane; rotation around Y axis
+    const rotY = Math.atan2(xDir.z, xDir.x);
+    showOriginMarker(rotY);
+
+    setStatus(`X-Achse: ${bearingDeg.toFixed(1)}° — Ursprung + Richtung gesetzt`);
+    console.log(`Pick Origin Step 2: X-axis direction ${bearingDeg.toFixed(1)}° — vec(${xDir.x.toFixed(3)}, ${xDir.y.toFixed(3)}, ${xDir.z.toFixed(3)})`);
+
+    // Reset banner color
+    const banner = document.getElementById('originBanner');
+    if (banner) banner.style.background = '';
+
+    finishPickOrigin();
+  }
 }
+
+function updateXAxisDisplay(bearingDeg) {
+  // Update CRS panel rotation field
+  const rotEl = document.getElementById('crsRotation');
+  if (rotEl) {
+    const norm = Math.round(bearingDeg * 10) / 10;
+    rotEl.value = bearingDeg === 0 ? '0° (Norden, default)' : `${norm}° (via Pick)`;
+    rotEl.readOnly = true;
+    rotEl.style.color = 'var(--text-muted)';
+  }
+
+  // Compute xAxis values and store
+  const norm = ((bearingDeg % 360) + 360) % 360;
+  window._crsPickRotation = {
+    deg: norm,
+    xAxisAbscissa: Math.round(Math.cos((90 - norm) * Math.PI / 180) * 1e6) / 1e6,
+    xAxisOrdinate: Math.round(Math.sin((90 - norm) * Math.PI / 180) * 1e6) / 1e6,
+  };
+}
+
+// X-axis arrow helpers removed — origin marker rotation handles this now
+function removeXAxisArrow() {}  // no-op, kept for compatibility
 
 function centerOrigin() {
   const bbox = new THREE.Box3();
@@ -2657,7 +2874,12 @@ function removeOriginMarker() {
   }
 }
 
-function showOriginMarker() {
+/**
+ * Show origin marker (RGB axes). Optional rotationY rotates the whole
+ * gizmo around Y so that the red X-axis points in the picked direction.
+ * @param {number} [rotationY=0] Rotation around Y in radians
+ */
+function showOriginMarker(rotationY) {
   removeOriginMarker();
 
   const bbox = new THREE.Box3();
@@ -2665,8 +2887,8 @@ function showOriginMarker() {
   if (!meshes.length) return;
   meshes.forEach((m) => bbox.expandByObject(m));
   const size = bbox.getSize(new THREE.Vector3());
-  const arm = Math.max(0.5, Math.max(size.x, size.y, size.z) * 0.15);
-  const thick = arm * 0.02;
+  const arm = Math.max(0.3, Math.max(size.x, size.y, size.z) * 0.03);
+  const thick = arm * 0.03;
 
   const group = new THREE.Group();
   group.name = 'originMarker';
@@ -2693,6 +2915,11 @@ function showOriginMarker() {
     new THREE.SphereGeometry(thick * 4, 12, 12),
     new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false })
   ));
+
+  // Apply rotation so X-axis points in picked direction
+  if (rotationY) {
+    group.rotation.y = -rotationY;
+  }
 
   group.renderOrder = 999;
   group.traverse((child) => { if (child.isMesh) child.renderOrder = 999; });
@@ -3361,6 +3588,278 @@ function restoreGfxSettings() {
     setSelect('gfx-msaa', s.msaa);
     setCheck('gfx-smaa', s.smaa);
   } catch (_) {}
+}
+
+// =====================================
+// CRS PANEL
+// =====================================
+
+window.crsOverride = null;
+
+function setupCrsPanel() {
+  // Toggle button
+  document.getElementById('toggleCrs')?.addEventListener('click', () => {
+    const panel = document.getElementById('crsPanel');
+    panel?.classList.toggle('hidden');
+    document.getElementById('toggleCrs')?.classList.toggle('active', !panel?.classList.contains('hidden'));
+  });
+
+  // "Aus Karte" — pick position on Cesium, auto-apply immediately
+  document.getElementById('crsFromMap')?.addEventListener('click', () => {
+    const epsg = document.getElementById('crsEpsg')?.value || 'EPSG:4326';
+    activatePickupMode(epsg, (result) => {
+      // Fill fields
+      document.getElementById('crsEastings').value = result.eastings.toFixed(2);
+      document.getElementById('crsNorthings').value = result.northings.toFixed(2);
+
+      const height = parseFloat(document.getElementById('crsHeight')?.value) || 0;
+      const rot = window._crsPickRotation || { deg: 0, xAxisAbscissa: 1.0, xAxisOrdinate: 0.0 };
+
+      // Auto-apply
+      const geoResult = applyGeorefOverride({ epsg, eastings: result.eastings, northings: result.northings, height });
+      if (geoResult) {
+        window.crsOverride = {
+          epsg, eastings: result.eastings, northings: result.northings, height,
+          lat: geoResult.lat, lon: geoResult.lon,
+          rotationDeg: rot.deg, xAxisAbscissa: rot.xAxisAbscissa, xAxisOrdinate: rot.xAxisOrdinate,
+        };
+        const resultEl = document.getElementById('crsResult');
+        if (resultEl) {
+          resultEl.style.display = 'block';
+          resultEl.textContent = `✅ ${geoResult.lat.toFixed(3)}°N / ${geoResult.lon.toFixed(3)}°E — ${rot.deg}°`;
+        }
+        // Show save button
+        const saveBtn = document.getElementById('crsSaveIfc');
+        if (saveBtn) saveBtn.style.display = '';
+        setStatus('Georeferenzierung übernommen');
+      }
+    });
+  });
+
+  // Rotation edit button — toggle between read-only (pick) and editable
+  document.getElementById('crsRotationEdit')?.addEventListener('click', () => {
+    const rotEl = document.getElementById('crsRotation');
+    if (!rotEl) return;
+    if (rotEl.readOnly) {
+      rotEl.readOnly = false;
+      rotEl.style.color = 'var(--text-primary)';
+      rotEl.value = window._crsPickRotation ? String(window._crsPickRotation.deg) : '0';
+      rotEl.focus();
+      rotEl.select();
+    } else {
+      // Parse manual value and compute xAxis
+      const deg = parseFloat(rotEl.value) || 0;
+      const norm = ((deg % 360) + 360) % 360;
+      window._crsPickRotation = {
+        deg: norm,
+        xAxisAbscissa: Math.round(Math.cos((90 - norm) * Math.PI / 180) * 1e6) / 1e6,
+        xAxisOrdinate: Math.round(Math.sin((90 - norm) * Math.PI / 180) * 1e6) / 1e6,
+      };
+      rotEl.value = `${norm}° (manuell)`;
+      rotEl.readOnly = true;
+      rotEl.style.color = 'var(--text-muted)';
+    }
+  });
+
+  // "Anwenden" — apply georef override via georef.js
+  document.getElementById('crsApply')?.addEventListener('click', () => {
+    const epsg = document.getElementById('crsEpsg')?.value;
+    const eastings = parseFloat(document.getElementById('crsEastings')?.value);
+    const northings = parseFloat(document.getElementById('crsNorthings')?.value);
+    const height = parseFloat(document.getElementById('crsHeight')?.value) || 0;
+
+    if (isNaN(eastings) || isNaN(northings)) {
+      setStatus('Eastings/Northings eingeben');
+      return;
+    }
+
+    // Get rotation from pick or manual edit
+    const rot = window._crsPickRotation || { deg: 0, xAxisAbscissa: 1.0, xAxisOrdinate: 0.0 };
+
+    const result = applyGeorefOverride({ epsg, eastings, northings, height });
+
+    if (result) {
+      window.crsOverride = {
+        epsg, eastings, northings, height,
+        lat: result.lat, lon: result.lon,
+        rotationDeg: rot.deg,
+        xAxisAbscissa: rot.xAxisAbscissa,
+        xAxisOrdinate: rot.xAxisOrdinate,
+      };
+
+      const resultEl = document.getElementById('crsResult');
+      if (resultEl) {
+        resultEl.style.display = 'block';
+        resultEl.textContent = `✅ ${result.lat.toFixed(3)}°N / ${result.lon.toFixed(3)}°E — ${rot.deg}°`;
+      }
+      // Show save button
+      const saveBtn = document.getElementById('crsSaveIfc');
+      if (saveBtn) saveBtn.style.display = '';
+      setStatus('CRS Override angewendet');
+    } else {
+      setStatus('Konvertierung fehlgeschlagen — EPSG prüfen');
+    }
+  });
+
+  // "💾 IFC speichern" — patch IFC with MapConversion and download
+  document.getElementById('crsSaveIfc')?.addEventListener('click', () => {
+    const override = window.crsOverride;
+    if (!override || !state.lastFileBuffer) {
+      setStatus('Kein Override oder keine IFC-Datei');
+      return;
+    }
+
+    const ifcText = new TextDecoder('utf-8', { fatal: false }).decode(state.lastFileBuffer);
+    const epsgCode = (override.epsg || 'EPSG:4326').replace('EPSG:', '');
+    const epsgNames = {
+      '25832': 'ETRS89 / UTM zone 32N', '25833': 'ETRS89 / UTM zone 33N',
+      '31467': 'DHDN / 3-degree Gauss-Kruger zone 3', '4326': 'WGS 84'
+    };
+    const epsgName = epsgNames[epsgCode] || `EPSG:${epsgCode}`;
+
+    // Import patchIfcWithMapConversion is in georef.js — call via dynamic import
+    import('./georef.js').then(({ patchIfcWithMapConversion }) => {
+      // If not exported, patch inline
+      console.warn('patchIfcWithMapConversion not available as export — using inline');
+    }).catch(() => {});
+
+    // Patch is in georef.js but not exported — we'll do inline patching here
+    // Actually, let's trigger download of patched IFC via a simpler approach:
+    // Re-encode the patched text
+    const hasExistingMC = /IFCMAPCONVERSION/i.test(ifcText);
+    let patched = ifcText;
+
+    if (!hasExistingMC) {
+      // Inline patch — same logic as patchIfcWithMapConversion in georef.js
+      try {
+        let maxId = 0;
+        const idRe = /^#(\d+)\s*=/gm;
+        let m;
+        while ((m = idRe.exec(ifcText)) !== null) {
+          const id = parseInt(m[1]);
+          if (id > maxId) maxId = id;
+        }
+        const nextId = maxId + 1;
+
+        const ctxRe = /^#(\d+)\s*=\s*IFCGEOMETRICREPRESENTATIONCONTEXT\s*\(/gim;
+        let geoRepCtx = null;
+        while ((m = ctxRe.exec(ifcText)) !== null) { geoRepCtx = m[1]; break; }
+
+        if (geoRepCtx) {
+          const xA = override.xAxisAbscissa ?? 1.0;
+          const xO = override.xAxisOrdinate ?? 0.0;
+          const crsLine = `#${nextId}=IFCPROJECTEDCRS('${epsgName}','EPSG:${epsgCode}',$,$,$,$,$);`;
+          const mcLine = `#${nextId + 1}=IFCMAPCONVERSION(#${geoRepCtx},#${nextId},${override.eastings},${override.northings},${override.height || 0},${xA},${xO},1.0);`;
+
+          const endsecIdx = patched.lastIndexOf('ENDSEC;');
+          if (endsecIdx !== -1) {
+            patched = patched.substring(0, endsecIdx) + crsLine + '\n' + mcLine + '\n' + patched.substring(endsecIdx);
+          }
+          console.log(`IFC patched: EPSG:${epsgCode}, E=${override.eastings}, N=${override.northings}, xAxis=${xA}/${xO}`);
+        }
+      } catch (e) {
+        console.error('IFC patch failed:', e);
+      }
+    } else {
+      setStatus('IFC enthält bereits IfcMapConversion — wird unverändert gespeichert');
+    }
+
+    // Download
+    const blob = new Blob([patched], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const baseName = (state.lastFileName || 'model.ifc').replace(/\.ifc$/i, '');
+    a.download = `${baseName}_georef.ifc`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus(`💾 ${a.download} gespeichert`);
+  });
+}
+
+function updateCrsPanel(ifcText) {
+  const info = extractCRSInfo(ifcText);
+  const dot = document.getElementById('crsStatusDot');
+  const text = document.getElementById('crsStatusText');
+  const details = document.getElementById('crsDetailsBody');
+  const form = document.getElementById('crsOverrideForm');
+  const panel = document.getElementById('crsPanel');
+
+  if (!dot || !text) return;
+
+  // Status indicator
+  const diag = info.diagnosis;
+  if (diag.isFullyGeoReferenced && !diag.isRevitDefault) {
+    dot.textContent = '🟢';
+    text.textContent = 'Vollständig georeferenziert';
+  } else if (diag.isPartial || (diag.isFullyGeoReferenced && diag.isRevitDefault)) {
+    dot.textContent = '🟡';
+    text.textContent = diag.isRevitDefault ? 'Revit-Standard (partiell)' : 'Partiell georeferenziert';
+  } else if (diag.isRevitDefault) {
+    dot.textContent = '🔴';
+    text.textContent = 'Revit-Standardkoordinaten';
+  } else {
+    dot.textContent = '🔴';
+    text.textContent = 'Keine Georeferenzierung';
+  }
+
+  // Details
+  if (details) {
+    let html = '';
+    if (info.site.lat !== null) {
+      html += `<b>IfcSite</b><br>Lat: ${info.site.lat.toFixed(6)}°  Lon: ${info.site.lon.toFixed(6)}°<br>`;
+    } else {
+      html += '<b>IfcSite</b>: nicht vorhanden<br>';
+    }
+    if (info.mapConversion.exists) {
+      html += `<b>IfcMapConversion</b><br>E: ${info.mapConversion.eastings}  N: ${info.mapConversion.northings}<br>H: ${info.mapConversion.height}  xAxis: ${info.mapConversion.xAxisAbscissa}/${info.mapConversion.xAxisOrdinate}  Scale: ${info.mapConversion.scale}<br>`;
+    } else {
+      html += '<b>IfcMapConversion</b>: nicht vorhanden<br>';
+    }
+    if (info.projectedCRS.exists) {
+      html += `<b>IfcProjectedCRS</b><br>${info.projectedCRS.name}`;
+      if (info.projectedCRS.epsg) html += ` (${info.projectedCRS.epsg})`;
+      html += '<br>';
+    } else {
+      html += '<b>IfcProjectedCRS</b>: nicht vorhanden<br>';
+    }
+    html += `<br><i>${diag.recommendation}</i>`;
+    details.innerHTML = html;
+  }
+
+  // Show override form only for red/yellow
+  if (form) {
+    if (diag.isFullyGeoReferenced && !diag.isRevitDefault) {
+      form.classList.add('hidden');
+    } else {
+      form.classList.remove('hidden');
+    }
+  }
+
+  // Pre-fill override from detected values
+  if (info.mapConversion.exists) {
+    const e = document.getElementById('crsEastings');
+    const n = document.getElementById('crsNorthings');
+    const h = document.getElementById('crsHeight');
+    if (e && !e.value) e.value = info.mapConversion.eastings;
+    if (n && !n.value) n.value = info.mapConversion.northings;
+    if (h && !h.value) h.value = info.mapConversion.height;
+  }
+  if (info.projectedCRS.epsg) {
+    const sel = document.getElementById('crsEpsg');
+    if (sel) {
+      // Try to select matching EPSG
+      for (const opt of sel.options) {
+        if (opt.value === info.projectedCRS.epsg) { sel.value = opt.value; break; }
+      }
+    }
+  }
+
+  // Auto-show panel on load
+  if (panel) {
+    panel.classList.remove('hidden');
+    document.getElementById('toggleCrs')?.classList.add('active');
+  }
 }
 
 // =====================================

@@ -35,6 +35,7 @@
         <button id="showAllBtn" class="topbar-btn hidden" title="Show All Hidden (Shift+H)">Show All</button>
         <button id="undoDeleteBtn" class="topbar-btn hidden" title="Undo Delete (Ctrl+Z)">Undo</button>
         <button id="toggleMeasure" class="topbar-btn" title="Measure (M)">Measure</button>
+        <button id="toggleCrs" class="topbar-btn" title="CRS / Georeferenzierung">CRS</button>
         <button id="toggleGfx" class="topbar-btn" title="Graphics Settings">GFX</button>
         <button id="toggleGrid" class="topbar-btn active" title="Toggle Grid">Grid</button>
         <button id="geoPickOrigin" class="topbar-btn" title="Pick reference point on model">Pick Origin</button>
@@ -118,6 +119,63 @@
             </label>
             <button id="mergeIfc" class="files-btn hidden" title="Merge all IFC files into one">Merge</button>
             <button id="downloadIfc" class="files-btn hidden" title="Download IFC (with deletions applied)">Download</button>
+          </div>
+        </div>
+
+        <!-- CRS Panel -->
+        <div id="crsPanel" class="gfx-panel hidden" style="right:auto;left:var(--space-3);width:320px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <span class="gfx-section-title" style="margin:0;border:none;padding:0;">CRS / Georeferenzierung</span>
+            <button class="panel-close" onclick="document.getElementById('crsPanel').classList.add('hidden');document.getElementById('toggleCrs')?.classList.remove('active');">&#10005;</button>
+          </div>
+
+          <!-- Status -->
+          <div id="crsStatus" style="display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,0.04);margin-bottom:8px;">
+            <span id="crsStatusDot" style="font-size:14px;">⚪</span>
+            <span id="crsStatusText" style="font-size:12px;color:var(--text-secondary);">Keine Datei geladen</span>
+          </div>
+
+          <!-- Details (collapsible) -->
+          <details id="crsDetails" class="crs-details">
+            <summary style="font-size:11px;color:var(--text-muted);cursor:pointer;margin-bottom:6px;">Details anzeigen</summary>
+            <div id="crsDetailsBody" style="font-size:11px;color:var(--text-secondary);font-family:monospace;line-height:1.6;padding:4px 0;"></div>
+          </details>
+
+          <!-- Override Form (hidden by default) -->
+          <div id="crsOverrideForm" class="hidden">
+            <div class="gfx-section-title">Override</div>
+            <div class="gfx-row">
+              <label>EPSG</label>
+              <select id="crsEpsg" class="gfx-select">
+                <option value="EPSG:25832">25832 — UTM 32N</option>
+                <option value="EPSG:25833">25833 — UTM 33N</option>
+                <option value="EPSG:31467">31467 — GK Zone 3</option>
+                <option value="EPSG:4326">4326 — WGS 84</option>
+              </select>
+            </div>
+            <div class="gfx-row">
+              <label>Eastings</label>
+              <input type="number" id="crsEastings" class="gfx-input" step="0.1" placeholder="0.0">
+            </div>
+            <div class="gfx-row">
+              <label>Northings</label>
+              <input type="number" id="crsNorthings" class="gfx-input" step="0.1" placeholder="0.0">
+            </div>
+            <div class="gfx-row">
+              <label>Höhe</label>
+              <input type="number" id="crsHeight" class="gfx-input" step="0.1" placeholder="0.0">
+            </div>
+            <div class="gfx-row" id="crsRotationRow">
+              <label>🧭</label>
+              <input type="text" id="crsRotation" class="gfx-input" value="0° (Norden, default)" readonly style="flex:1;color:var(--text-muted);cursor:default;">
+              <button id="crsRotationEdit" class="panel-close" style="font-size:11px;width:22px;height:22px;min-width:0;padding:0;" title="Manuell bearbeiten">✏️</button>
+            </div>
+            <div style="display:flex;gap:6px;margin-top:8px;">
+              <button id="crsFromMap" class="files-btn" style="flex:1;font-size:11px;">📍 Aus Karte</button>
+              <button id="crsApply" class="files-btn primary" style="flex:1;font-size:11px;">✅ Anwenden</button>
+            </div>
+            <div id="crsResult" style="font-size:11px;color:var(--brand);margin-top:6px;display:none;"></div>
+            <button id="crsSaveIfc" class="files-btn" style="width:100%;margin-top:6px;font-size:11px;display:none;">💾 IFC mit Georef speichern</button>
           </div>
         </div>
 

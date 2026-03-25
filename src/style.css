@@ -1185,6 +1185,24 @@ html, body, #app {
   border-color: var(--brand);
 }
 
+.gfx-input {
+  flex: 1;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: monospace;
+  outline: none;
+  min-width: 0;
+}
+.gfx-input:focus { border-color: var(--brand); }
+.gfx-input::placeholder { color: var(--text-muted); }
+
+.crs-details summary::-webkit-details-marker { color: var(--text-muted); }
+.crs-details[open] summary { margin-bottom: 4px; }
+
 .gfx-color {
   width: 32px;
   height: 24px;

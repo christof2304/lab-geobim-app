@@ -961,14 +961,139 @@ async function cleanIfcBuffer(rawBuffer, excludedIds) {
   return cleanedBuffer;
 }
 
+// =====================================
+// PATCH IFC WITH MAPCONVERSION
+// =====================================
+
+/**
+ * Inject IfcMapConversion + IfcProjectedCRS into raw IFC text.
+ * Also patches IfcSite RefLatitude/RefLongitude to correct WGS84 DMS values.
+ *
+ * @param {string} ifcText - Raw IFC file content
+ * @param {{ eastings: number, northings: number, height: number,
+ *           epsgCode: string, epsgName: string,
+ *           xAxisAbscissa?: number, xAxisOrdinate?: number, scale?: number }} params
+ * @returns {string} Patched IFC text (or original on error)
+ */
+function patchIfcWithMapConversion(ifcText, params) {
+  try {
+    const { eastings, northings, height, epsgCode, epsgName,
+            xAxisAbscissa = 1.0, xAxisOrdinate = 0.0, scale = 1.0 } = params;
+
+    // 1. Find highest entity ID
+    let maxId = 0;
+    const idRe = /^#(\d+)\s*=/gm;
+    let m;
+    while ((m = idRe.exec(ifcText)) !== null) {
+      const id = parseInt(m[1]);
+      if (id > maxId) maxId = id;
+    }
+    const nextId = maxId + 1;
+
+    // 2. Find IFCGEOMETRICREPRESENTATIONCONTEXT ID (the 3D context, not sub-contexts)
+    const ctxRe = /^#(\d+)\s*=\s*IFCGEOMETRICREPRESENTATIONCONTEXT\s*\(/gim;
+    let geoRepContextId = null;
+    while ((m = ctxRe.exec(ifcText)) !== null) {
+      geoRepContextId = m[1];
+      // Prefer the first one (usually the main 3D context)
+      break;
+    }
+    if (!geoRepContextId) {
+      console.error('patchIfcWithMapConversion: IFCGEOMETRICREPRESENTATIONCONTEXT not found');
+      return ifcText;
+    }
+
+    // 3. Build new entities
+    const crsEntity = `#${nextId}=IFCPROJECTEDCRS('${epsgName}','EPSG:${epsgCode}',$,$,$,$,$);`;
+    const mcEntity = `#${nextId + 1}=IFCMAPCONVERSION(#${geoRepContextId},#${nextId},${eastings},${northings},${height},${xAxisAbscissa},${xAxisOrdinate},${scale});`;
+
+    // Insert before ENDSEC;
+    const endsecIdx = ifcText.lastIndexOf('ENDSEC;');
+    if (endsecIdx === -1) {
+      console.error('patchIfcWithMapConversion: ENDSEC not found');
+      return ifcText;
+    }
+
+    let patched = ifcText.substring(0, endsecIdx)
+      + crsEntity + '\n'
+      + mcEntity + '\n'
+      + ifcText.substring(endsecIdx);
+
+    // 4. Patch IfcSite RefLatitude/RefLongitude to correct WGS84 DMS
+    // Convert eastings/northings to WGS84 first
+    const fullEpsg = `EPSG:${epsgCode}`;
+    let lon, lat;
+    if (fullEpsg === 'EPSG:4326') {
+      lon = eastings;
+      lat = northings;
+    } else {
+      if (!proj4.defs(fullEpsg) && CRS_DEFS[fullEpsg]) {
+        proj4.defs(fullEpsg, CRS_DEFS[fullEpsg]);
+      }
+      [lon, lat] = proj4(fullEpsg, 'EPSG:4326', [eastings, northings]);
+    }
+
+    // Decimal degrees → DMS compound (deg, min, sec, millionthsec)
+    function decToDmsCompound(dec) {
+      const sign = dec < 0 ? -1 : 1;
+      dec = Math.abs(dec);
+      const deg = Math.floor(dec);
+      const minFloat = (dec - deg) * 60;
+      const min = Math.floor(minFloat);
+      const secFloat = (minFloat - min) * 60;
+      const sec = Math.floor(secFloat);
+      const msec = Math.round((secFloat - sec) * 1000000);
+      return `(${sign * deg},${min},${sec},${msec})`;
+    }
+
+    const latDms = decToDmsCompound(lat);
+    const lonDms = decToDmsCompound(lon);
+
+    // Replace IfcSite lat/lon: match the two DMS compound tuples
+    const siteRe = /IFCSITE\s*\(([^)]*\([^)]*\))\s*,\s*(\([^)]*\))\s*,\s*(\([^)]*\))/i;
+    patched = patched.replace(siteRe, (match, prefix, oldLat, oldLon) => {
+      return match.replace(oldLat, latDms).replace(oldLon, lonDms);
+    });
+
+    console.log(`IFC patched: #${nextId} IFCPROJECTEDCRS(${epsgName}), #${nextId + 1} IFCMAPCONVERSION, Site DMS updated`);
+    return patched;
+  } catch (e) {
+    console.error('patchIfcWithMapConversion failed:', e);
+    return ifcText;
+  }
+}
+
+// =====================================
+// ION UPLOAD (with georef patching)
+// =====================================
+
 export async function uploadToIon(appState) {
   const token = geoState.ionToken || document.getElementById('geoIonToken')?.value?.trim();
   if (!token) { alert('Please enter a Cesium Ion Access Token'); return; }
-  if (geoState.lon == null || geoState.lat == null) { alert('Please set a position first'); return; }
   if (!appState.lastFileBuffer) { alert('No IFC file loaded'); return; }
 
   const statusEl = document.getElementById('geoStatus');
   const uploadBtn = document.getElementById('geoUploadBtn');
+
+  // Check georef state: detected from IFC, manual override, or nothing
+  const override = window.crsOverride;
+  const hasDetectedGeoref = geoState.detected && geoState.lon != null;
+  const hasOverride = override && override.lat != null && override.lon != null;
+
+  if (!hasDetectedGeoref && !hasOverride) {
+    // No georef at all — show warning dialog
+    const proceed = confirm(
+      'Keine Georeferenzierung vorhanden.\n\n' +
+      'Das Modell hat keine IfcMapConversion und es wurde kein Override gesetzt.\n' +
+      'Cesium Ion kann das Modell möglicherweise nicht korrekt positionieren.\n\n' +
+      '→ CRS-Panel öffnen und Koordinaten eingeben, oder\n' +
+      '→ "OK" für Upload ohne Georeferenzierung'
+    );
+    if (!proceed) return;
+    // Allow upload without position — Ion will place at 0,0
+    if (geoState.lon == null) { geoState.lon = 0; geoState.lat = 0; }
+  }
+
   if (uploadBtn) { uploadBtn.disabled = true; uploadBtn.textContent = 'Uploading...'; }
   if (statusEl) { statusEl.textContent = 'Preparing IFC...'; statusEl.style.color = ''; }
 
@@ -982,6 +1107,47 @@ export async function uploadToIon(appState) {
         uploadBuffer = await cleanIfcBuffer(appState.lastFileBuffer, excludedIds);
         console.log(`Upload buffer: ${(uploadBuffer.length / 1024 / 1024).toFixed(1)} MB (was ${(appState.lastFileBuffer.length / 1024 / 1024).toFixed(1)} MB)`);
       }
+    }
+
+    // Patch IFC with MapConversion if override is set and file isn't already georeferenced
+    if (hasOverride) {
+      const ifcText = new TextDecoder('utf-8', { fatal: false }).decode(uploadBuffer);
+      const hasExistingMC = /IFCMAPCONVERSION/i.test(ifcText);
+
+      if (!hasExistingMC) {
+        // Derive EPSG code/name from override
+        const epsgCode = (override.epsg || 'EPSG:4326').replace('EPSG:', '');
+        const epsgNames = {
+          '25832': 'ETRS89 / UTM zone 32N', '25833': 'ETRS89 / UTM zone 33N',
+          '31467': 'DHDN / 3-degree Gauss-Kruger zone 3', '4326': 'WGS 84'
+        };
+        const epsgName = epsgNames[epsgCode] || `EPSG:${epsgCode}`;
+
+        if (statusEl) statusEl.textContent = `Patching IFC (EPSG:${epsgCode})...`;
+
+        const patched = patchIfcWithMapConversion(ifcText, {
+          eastings: override.eastings, northings: override.northings,
+          height: override.height || 0, epsgCode, epsgName,
+          xAxisAbscissa: override.xAxisAbscissa ?? 1.0,
+          xAxisOrdinate: override.xAxisOrdinate ?? 0.0,
+        });
+
+        uploadBuffer = new TextEncoder().encode(patched);
+        console.log(`IFC patched with IfcMapConversion (EPSG:${epsgCode})`);
+        if (statusEl) { statusEl.textContent = `✅ IfcMapConversion eingefügt (EPSG:${epsgCode})`; statusEl.style.color = '#2ECFB0'; }
+        // Brief pause to show the message
+        await new Promise(r => setTimeout(r, 800));
+      } else {
+        if (statusEl) { statusEl.textContent = '✅ Kein Patch nötig — bereits georeferenziert'; statusEl.style.color = '#2ECFB0'; }
+        await new Promise(r => setTimeout(r, 800));
+      }
+
+      // Use override position for Ion
+      geoState.lon = override.lon;
+      geoState.lat = override.lat;
+    } else if (hasDetectedGeoref) {
+      if (statusEl) { statusEl.textContent = '✅ Kein Patch nötig — georeferenziert aus IFC'; statusEl.style.color = '#2ECFB0'; }
+      await new Promise(r => setTimeout(r, 800));
     }
 
     if (statusEl) statusEl.textContent = 'Creating asset...';
@@ -1052,13 +1218,15 @@ async function pollAssetStatus(assetId, token, statusEl) {
       const data = await resp.json();
 
       if (data.status === 'COMPLETE') {
-        if (statusEl) { statusEl.textContent = `Asset #${assetId} ready!`; statusEl.style.color = '#2ECFB0'; }
+        const ionUrl = `https://ion.cesium.com/assets/${assetId}`;
+        if (statusEl) { statusEl.innerHTML = `✅ Asset #${assetId} ready! <a href="${ionUrl}" target="_blank" rel="noopener" style="color:#2ECFB0;text-decoration:underline;">Open in Cesium Ion</a>`; statusEl.style.color = '#2ECFB0'; }
         const linkEl = document.getElementById('geoAssetLink');
         if (linkEl) {
-          linkEl.href = `https://ion.cesium.com/assets/${assetId}`;
-          linkEl.textContent = `Open Asset #${assetId}`;
+          linkEl.href = ionUrl;
+          linkEl.textContent = `Open Asset #${assetId} in Cesium Ion`;
           linkEl.style.display = 'inline-block';
         }
+        console.log(`Ion asset ready: ${ionUrl}`);
         return;
       } else if (data.status === 'ERROR') {
         if (statusEl) { statusEl.textContent = `Tiling failed for #${assetId}`; statusEl.style.color = '#ff6666'; }
@@ -1233,6 +1401,178 @@ export function preGenerateGlb(appState) {
       console.warn('GLB pre-generation failed:', err.message);
     }
   }, 2000);
+}
+
+// =====================================
+// CRS OVERRIDE — Apply manual georef
+// =====================================
+
+/**
+ * Apply a manual georeferencing override.
+ * Converts projected coordinates to WGS84, updates geoState,
+ * flies camera to position, and places model anchor.
+ *
+ * @param {{ epsg: string, eastings: number, northings: number, height: number }} params
+ * @returns {{ lat: number, lon: number } | null}
+ */
+export function applyGeorefOverride(params) {
+  const { epsg, eastings, northings, height } = params;
+  if (eastings == null || northings == null) return null;
+
+  let lon, lat;
+  if (epsg === 'EPSG:4326') {
+    lon = eastings;
+    lat = northings;
+  } else {
+    // Ensure proj4 def exists
+    if (!proj4.defs(epsg) && CRS_DEFS[epsg]) {
+      proj4.defs(epsg, CRS_DEFS[epsg]);
+    }
+    try {
+      [lon, lat] = proj4(epsg, 'EPSG:4326', [eastings, northings]);
+    } catch (e) {
+      console.error('applyGeorefOverride: proj4 conversion failed', e);
+      return null;
+    }
+  }
+
+  // Update geoState
+  geoState.lon = lon;
+  geoState.lat = lat;
+  geoState.height = height || 0;
+  geoState.detected = true;
+  geoState.crsName = epsg;
+
+  // Fly Cesium camera if viewer exists
+  if (cesiumViewer) {
+    const Cesium = window.Cesium;
+    cesiumViewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(lon, lat, (height || 0) + 200),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 },
+      duration: 1.5,
+    });
+
+    // Sample terrain height
+    sampleTerrainAt(lon, lat);
+
+    // Update pin
+    updatePin();
+  }
+
+  // Update geo panel UI if present
+  const statusEl = document.getElementById('geoStatus');
+  if (statusEl) {
+    statusEl.textContent = `Override: ${lat.toFixed(6)}°N, ${lon.toFixed(6)}°E`;
+    statusEl.style.color = '#2ECFB0';
+  }
+
+  console.log(`CRS Override applied: ${epsg} → ${lat.toFixed(6)}°N, ${lon.toFixed(6)}°E, h=${height || 0}`);
+  return { lat, lon };
+}
+
+// =====================================
+// PICKUP MODE — Click on Cesium map
+// =====================================
+
+let pickupHandler = null;
+let pickupOverlay = null;
+
+/**
+ * Single-click pickup mode on Cesium minimap — position only.
+ * X-axis rotation is handled by Pick Origin in the 3D viewport.
+ *
+ * @param {string} targetEpsg - Target EPSG code (e.g. 'EPSG:25832')
+ * @param {function} callback - Called with { lon, lat, eastings, northings, epsg }
+ */
+export function activatePickupMode(targetEpsg, callback) {
+  const Cesium = window.Cesium;
+  if (!cesiumViewer || !Cesium) {
+    console.warn('Pickup mode: Cesium viewer not available — open Geo panel first');
+    return;
+  }
+
+  deactivatePickupMode();
+
+  // Overlay hint
+  pickupOverlay = document.createElement('div');
+  pickupOverlay.id = 'crsPickupOverlay';
+  pickupOverlay.style.cssText =
+    'position:absolute;top:0;left:0;right:0;bottom:0;z-index:100;' +
+    'display:flex;align-items:flex-start;justify-content:center;padding-top:8px;' +
+    'pointer-events:none;';
+  pickupOverlay.innerHTML =
+    '<div style="background:rgba(14,17,23,0.85);border:1px solid rgba(46,207,176,0.4);' +
+    'border-radius:6px;padding:6px 14px;font-size:11px;color:#2ECFB0;pointer-events:none;">' +
+    '📍 Klicke auf die Karte um Position zu übernehmen</div>';
+
+  const cesiumContainer = cesiumViewer.container;
+  cesiumContainer.style.cursor = 'crosshair';
+  cesiumContainer.appendChild(pickupOverlay);
+
+  pickupHandler = new Cesium.ScreenSpaceEventHandler(cesiumViewer.scene.canvas);
+  pickupHandler.setInputAction((click) => {
+    const cartesian = cesiumViewer.scene.pickPosition(click.position)
+      || cesiumViewer.camera.pickEllipsoid(click.position, cesiumViewer.scene.globe.ellipsoid);
+    if (!cartesian) { deactivatePickupMode(); return; }
+
+    const carto = Cesium.Cartographic.fromCartesian(cartesian);
+    const lon = Cesium.Math.toDegrees(carto.longitude);
+    const lat = Cesium.Math.toDegrees(carto.latitude);
+
+    let eastings = lon, northings = lat;
+    if (targetEpsg && targetEpsg !== 'EPSG:4326') {
+      if (!proj4.defs(targetEpsg) && CRS_DEFS[targetEpsg]) {
+        proj4.defs(targetEpsg, CRS_DEFS[targetEpsg]);
+      }
+      try {
+        [eastings, northings] = proj4('EPSG:4326', targetEpsg, [lon, lat]);
+      } catch (e) {
+        console.warn('Pickup: proj4 conversion failed, using WGS84', e);
+      }
+    }
+
+    deactivatePickupMode();
+
+    if (typeof callback === 'function') {
+      callback({ lon, lat, eastings, northings, epsg: targetEpsg });
+    }
+  }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+  const escHandler = (e) => {
+    if (e.key === 'Escape') {
+      deactivatePickupMode();
+      document.removeEventListener('keydown', escHandler);
+    }
+  };
+  document.addEventListener('keydown', escHandler);
+}
+
+function deactivatePickupMode() {
+  if (pickupHandler) {
+    pickupHandler.destroy();
+    pickupHandler = null;
+  }
+  if (pickupOverlay) {
+    pickupOverlay.remove();
+    pickupOverlay = null;
+  }
+  if (cesiumViewer) {
+    cesiumViewer.container.style.cursor = '';
+  }
+}
+
+function updatePin() {
+  if (!cesiumViewer || geoState.lon == null) return;
+  const Cesium = window.Cesium;
+  const pos = Cesium.Cartesian3.fromDegrees(geoState.lon, geoState.lat, effectiveHeight());
+  if (pinEntity) {
+    pinEntity.position = pos;
+  } else {
+    pinEntity = cesiumViewer.entities.add({
+      position: pos,
+      point: { pixelSize: 10, color: Cesium.Color.fromCssColorString('#2ECFB0'), outlineColor: Cesium.Color.WHITE, outlineWidth: 1 },
+    });
+  }
 }
 
 export { geoState };
