@@ -24,8 +24,8 @@ Live at **[lab.geobim.app](https://lab.geobim.app)**
 
 | Component | Library |
 |-----------|---------|
-| IFC parsing | `@ifc-lite/parser`, `@ifc-lite/geometry`, `@ifc-lite/export` (Rust/WASM) |
-| 3D rendering | Three.js |
+| IFC parsing | `@thatopen/components` (built on `web-ifc` WASM), `@thatopen/fragments` |
+| 3D rendering | Three.js, `n8ao` (SSAO) |
 | Globe | CesiumJS (CDN) |
 | CRS conversion | proj4 |
 | Ion upload | `@aws-sdk/client-s3` |
